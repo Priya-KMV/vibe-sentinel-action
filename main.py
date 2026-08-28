@@ -3,15 +3,19 @@ import os
 import re
 import subprocess
 import sys
-from github import Github
-from openai import OpenAI
 
-OPENAI_API_KEY = os.getenv("INPUT_OPENAI_API_KEY")
+from github import Github
+from google import genai
+from google.genai import types
+
+# Environment variables
+GEMINI_API_KEY = os.getenv("INPUT_OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY")
 GITHUB_TOKEN = os.getenv("INPUT_GITHUB_TOKEN")
 REPO_NAME = os.getenv("GITHUB_REPOSITORY")
 WORKSPACE = os.getenv("GITHUB_WORKSPACE", ".")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Initialize clients
+client = genai.Client(api_key=GEMINI_API_KEY)
 gh = Github(GITHUB_TOKEN)
 
 
@@ -26,8 +30,10 @@ def run_tests() -> tuple[bool, str]:
 
 
 def sanitize_logs(log_text: str) -> str:
-    cleaned = re.sub(r"sk-[a-zA-Z0-9]{32,}", "[REDACTED_OPENAI_KEY]", log_text)
+    cleaned = re.sub(r"AIzaSy[a-zA-Z0-9_-]{33}", "[REDACTED_GEMINI_KEY]", log_text)
+    cleaned = re.sub(r"sk-[a-zA-Z0-9]{32,}", "[REDACTED_OPENAI_KEY]", cleaned)
     cleaned = re.sub(r"ghp_[a-zA-Z0-9]{36}", "[REDACTED_GITHUB_TOKEN]", cleaned)
+
     injection_patterns = [
         r"(?i)ignore\s+previous\s+instructions",
         r"(?i)system\s+prompt",
@@ -48,12 +54,13 @@ def generate_patch(sanitized_log: str) -> str:
         "CODE:\n"
         "<full corrected code content>"
     )
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.0,
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(temperature=0.0),
     )
-    return response.choices[0].message.content.strip()
+    return response.text.strip()
 
 
 def validate_and_parse_patch(patch_response: str) -> tuple[str, str]:
@@ -75,6 +82,15 @@ def validate_and_parse_patch(patch_response: str) -> tuple[str, str]:
 
     fixed_code = "\n".join(code_lines).strip()
 
+    # Strip markdown backticks if Gemini includes code block syntax
+    if fixed_code.startswith("```python"):
+        fixed_code = fixed_code[9:]
+    elif fixed_code.startswith("```"):
+        fixed_code = fixed_code[3:]
+    if fixed_code.endswith("```"):
+        fixed_code = fixed_code[:-3]
+    fixed_code = fixed_code.strip()
+
     try:
         tree = ast.parse(fixed_code)
     except SyntaxError as e:
@@ -84,7 +100,9 @@ def validate_and_parse_patch(patch_response: str) -> tuple[str, str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id in forbidden_calls:
-                raise SecurityError(f"Guardrail Alert: Blocked prohibited function call '{node.func.id}'.")
+                raise SecurityError(
+                    f"Guardrail Alert: Blocked prohibited function call '{node.func.id}'."
+                )
 
     return target_file, fixed_code
 
@@ -106,17 +124,23 @@ def apply_patch_and_open_pr(target_file: str, fixed_code: str, raw_logs: str):
 
     branch_name = f"sentinel/auto-fix-{os.urandom(4).hex()}"
     subprocess.run(["git", "config", "user.name", "github-actions[bot]"], cwd=WORKSPACE)
-    subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], cwd=WORKSPACE)
+    subprocess.run(
+        ["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"],
+        cwd=WORKSPACE,
+    )
     subprocess.run(["git", "checkout", "-b", branch_name], cwd=WORKSPACE)
     subprocess.run(["git", "add", target_file], cwd=WORKSPACE)
-    subprocess.run(["git", "commit", "-m", f"fix(sentinel): auto-heal {target_file}"], cwd=WORKSPACE)
+    subprocess.run(
+        ["git", "commit", "-m", f"fix(sentinel): auto-heal {target_file}"], cwd=WORKSPACE
+    )
     subprocess.run(["git", "push", "origin", branch_name], cwd=WORKSPACE)
 
     repo = gh.get_repo(REPO_NAME)
     pr_body = (
         "### 🤖 Vibe Sentinel Auto-Fix Report\n\n"
         f"**Target File:** `{target_file}`\n"
-        "**Guardrail Checks:** Passed (AST Syntax Validated, No Forbidden Calls)\n\n"
+        "**Guardrail Checks:** Passed (AST Syntax Validated, No Forbidden Calls)\n"
+        "**Engine:** Gemini 2.5 Flash\n\n"
         "**Original Failure Log:**\n"
         "```\n"
         f"{raw_logs[:600]}\n"
@@ -144,7 +168,7 @@ def main():
     print("❌ Failure detected. Running input guardrails...")
     clean_logs = sanitize_logs(logs)
 
-    print("🧠 Generating patch via LLM...")
+    print("🧠 Generating patch via Gemini 2.5 Flash...")
     patch_response = generate_patch(clean_logs)
 
     try:
