@@ -4,30 +4,21 @@ import re
 import subprocess
 import sys
 
-from github import Github
-from google import genai
-from google.genai import types
+from github import Auth, Github
+from openai import OpenAI
 
-# 1. Resolve API key from GitHub Actions input mapping or standard env vars
-GEMINI_API_KEY = (
-    os.getenv("INPUT_OPENAI_API_KEY")
-    or os.getenv("GEMINI_API_KEY")
-    or os.getenv("GOOGLE_API_KEY")
-)
+# Environment variables
+OPENAI_API_KEY = os.getenv("INPUT_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 GITHUB_TOKEN = os.getenv("INPUT_GITHUB_TOKEN")
 REPO_NAME = os.getenv("GITHUB_REPOSITORY")
 WORKSPACE = os.getenv("GITHUB_WORKSPACE", ".")
 
-# Ensure key exists before initializing client
-if not GEMINI_API_KEY:
-    raise ValueError(
-        "Guardrail Alert: No API key found in environment variables. "
-        "Verify OPENAI_API_KEY secret is set in GitHub Repository Settings."
-    )
+if not OPENAI_API_KEY:
+    raise ValueError("Guardrail Alert: OPENAI_API_KEY secret is missing.")
 
-# Initialize clients explicitly
-client = genai.Client(api_key=GEMINI_API_KEY)
-gh = Github(GITHUB_TOKEN)
+# Initialize clients
+client = OpenAI(api_key=OPENAI_API_KEY)
+gh = Github(auth=Auth.Token(GITHUB_TOKEN)) if GITHUB_TOKEN else None
 
 
 def run_tests() -> tuple[bool, str]:
@@ -41,8 +32,7 @@ def run_tests() -> tuple[bool, str]:
 
 
 def sanitize_logs(log_text: str) -> str:
-    cleaned = re.sub(r"AIzaSy[a-zA-Z0-9_-]{33}", "[REDACTED_GEMINI_KEY]", log_text)
-    cleaned = re.sub(r"sk-[a-zA-Z0-9]{32,}", "[REDACTED_OPENAI_KEY]", cleaned)
+    cleaned = re.sub(r"sk-[a-zA-Z0-9]{32,}", "[REDACTED_OPENAI_KEY]", log_text)
     cleaned = re.sub(r"ghp_[a-zA-Z0-9]{36}", "[REDACTED_GITHUB_TOKEN]", cleaned)
 
     injection_patterns = [
@@ -66,12 +56,12 @@ def generate_patch(sanitized_log: str) -> str:
         "<full corrected code content>"
     )
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(temperature=0.0),
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.0,
     )
-    return response.text.strip()
+    return response.choices[0].message.content.strip()
 
 
 def validate_and_parse_patch(patch_response: str) -> tuple[str, str]:
@@ -93,7 +83,6 @@ def validate_and_parse_patch(patch_response: str) -> tuple[str, str]:
 
     fixed_code = "\n".join(code_lines).strip()
 
-    # Strip markdown backticks if Gemini includes code block syntax
     if fixed_code.startswith("```python"):
         fixed_code = fixed_code[9:]
     elif fixed_code.startswith("```"):
@@ -146,26 +135,27 @@ def apply_patch_and_open_pr(target_file: str, fixed_code: str, raw_logs: str):
     )
     subprocess.run(["git", "push", "origin", branch_name], cwd=WORKSPACE)
 
-    repo = gh.get_repo(REPO_NAME)
-    pr_body = (
-        "### 🤖 Vibe Sentinel Auto-Fix Report\n\n"
-        f"**Target File:** `{target_file}`\n"
-        "**Guardrail Checks:** Passed (AST Syntax Validated, No Forbidden Calls)\n"
-        "**Engine:** Gemini 2.5 Flash\n\n"
-        "**Original Failure Log:**\n"
-        "```\n"
-        f"{raw_logs[:600]}\n"
-        "```\n\n"
-        "*Automated patch generated and pre-verified by Vibe Sentinel.*"
-    )
-    repo.create_pull(
-        title=f"🤖 [Draft] Fix failing tests in {target_file}",
-        body=pr_body,
-        head=branch_name,
-        base="main",
-        draft=True,
-    )
-    print(f"🚀 Created Draft Pull Request on branch '{branch_name}'.")
+    if gh and REPO_NAME:
+        repo = gh.get_repo(REPO_NAME)
+        pr_body = (
+            "### 🤖 Vibe Sentinel Auto-Fix Report\n\n"
+            f"**Target File:** `{target_file}`\n"
+            "**Guardrail Checks:** Passed (AST Syntax Validated, No Forbidden Calls)\n"
+            "**Engine:** OpenAI GPT-4o\n\n"
+            "**Original Failure Log:**\n"
+            "```\n"
+            f"{raw_logs[:600]}\n"
+            "```\n\n"
+            "*Automated patch generated and pre-verified by Vibe Sentinel.*"
+        )
+        repo.create_pull(
+            title=f"🤖 [Draft] Fix failing tests in {target_file}",
+            body=pr_body,
+            head=branch_name,
+            base="main",
+            draft=True,
+        )
+        print(f"🚀 Created Draft Pull Request on branch '{branch_name}'.")
 
 
 def main():
@@ -179,7 +169,7 @@ def main():
     print("❌ Failure detected. Running input guardrails...")
     clean_logs = sanitize_logs(logs)
 
-    print("🧠 Generating patch via Gemini 2.5 Flash...")
+    print("🧠 Generating patch via GPT-4o...")
     patch_response = generate_patch(clean_logs)
 
     try:
