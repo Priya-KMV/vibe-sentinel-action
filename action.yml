@@ -1,0 +1,16 @@
+name: "Vibe Sentinel Action"
+description: "Monitors pytest failures, generates LLM patches with guardrails, and opens PRs."
+inputs:
+  openai_api_key:
+    description: "OpenAI API Key"
+    required: true
+  github_token:
+    description: "GitHub Token for opening PRs"
+    required: true
+
+runs:
+  using: "docker"
+  image: "Dockerfile"
+  env:
+    INPUT_OPENAI_API_KEY: ${{ inputs.openai_api_key }}
+    INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
