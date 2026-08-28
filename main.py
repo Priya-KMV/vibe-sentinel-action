@@ -8,13 +8,24 @@ from github import Github
 from google import genai
 from google.genai import types
 
-# Environment variables
-GEMINI_API_KEY = os.getenv("INPUT_OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY")
+# 1. Resolve API key from GitHub Actions input mapping or standard env vars
+GEMINI_API_KEY = (
+    os.getenv("INPUT_OPENAI_API_KEY")
+    or os.getenv("GEMINI_API_KEY")
+    or os.getenv("GOOGLE_API_KEY")
+)
 GITHUB_TOKEN = os.getenv("INPUT_GITHUB_TOKEN")
 REPO_NAME = os.getenv("GITHUB_REPOSITORY")
 WORKSPACE = os.getenv("GITHUB_WORKSPACE", ".")
 
-# Initialize clients
+# Ensure key exists before initializing client
+if not GEMINI_API_KEY:
+    raise ValueError(
+        "Guardrail Alert: No API key found in environment variables. "
+        "Verify OPENAI_API_KEY secret is set in GitHub Repository Settings."
+    )
+
+# Initialize clients explicitly
 client = genai.Client(api_key=GEMINI_API_KEY)
 gh = Github(GITHUB_TOKEN)
 
